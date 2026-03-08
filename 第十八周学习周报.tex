@@ -1,0 +1,334 @@
+\documentclass[12pt,a4paper]{ctexart}
+
+% 宏包引入
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{fancyhdr}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{xcolor}
+
+% 页面设置
+\geometry{left=2.5cm,right=2.5cm,top=3cm,bottom=3cm}
+
+% 页眉页脚设置
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{指导老师：吴少智}
+\fancyhead[R]{撰写人：丁正阳}
+\fancyfoot[C]{\thepage}
+
+% 超链接设置
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,      
+    urlcolor=cyan,
+}
+
+% 图表标题设置
+\captionsetup{font=small,labelfont=bf}
+
+\begin{document}
+
+% 标题页
+\begin{center}
+    {\LARGE \textbf{第十八周学习周报}}\\[0.5cm]
+    {\large Out: Feb 21, 2026}\\
+    {\large Due: Feb 27, 2026}\\[0.5cm]
+    {\large 电子科技大学}\\
+    {\large 本科科研项目}\\
+    {\large 脑机与深度学习 \#18}
+\end{center}
+
+\vspace{1cm}
+
+\noindent \textbf{Note:} This article reflects the specific guidance and implementation ideas of policies and regulations over a certain period. Some content may be subject to timeliness issues, and certain conclusions drawn may lack concrete evidence, potentially leading to some logical inconsistencies. Therefore, this article is intended for internal discussion only.
+
+\section{本周学习内容一览}
+
+上周FA-CDAN的失败让我深刻认识到类别条件化的重要性。本周我深入研究了Class-Conditional CORAL（CCCORAL）方法，并成功将其与CDAN结合。CCCORAL通过对齐每个类别的二阶统计量（协方差矩阵），实现了类别条件的特征对齐。为了确保结果的可靠性，我进行了大规模的多seed实验（seed 0-9，共10个随机种子）。初步结果显示，CDAN+CCCORAL相比纯CDAN有一定提升，这让我看到了希望。
+
+\section{为什么要加CCCORAL参数？}
+
+\subsection{FA-CDAN失败的反思}
+
+FA-CDAN的失败给了我一个重要教训：无条件的特征对齐会破坏类别结构。问题的关键在于，FA-CDAN对齐的是所有样本的全局均值，而不考虑类别信息。这就像把苹果和橙子混在一起求平均，得到的结果既不是苹果也不是橙子。
+
+那么，如何在进行特征对齐的同时保持类别结构呢？答案是：\textbf{类别条件的特征对齐}。
+
+\subsection{CORAL（Correlation Alignment）的原理}
+
+CORAL是一种经典的域适应方法，由Sun等人在2016年提出。它的核心思想是对齐源域和目标域特征的二阶统计量——协方差矩阵。
+
+CORAL损失定义为：
+
+\begin{equation}
+\mathcal{L}_{CORAL} = \frac{1}{4d^2}\|C_s - C_t\|_F^2
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $C_s$和$C_t$分别是源域和目标域特征的协方差矩阵
+    \item $\|\cdot\|_F$是Frobenius范数
+    \item $d$是特征维度
+\end{itemize}
+
+协方差矩阵捕捉了特征之间的相关性结构。对齐协方差矩阵意味着让两个域的特征具有相似的相关性模式，这比简单的均值对齐更加精细。
+
+\subsection{Class-Conditional CORAL的优势}
+
+但是，原始的CORAL仍然是无条件的——它对齐所有样本的协方差矩阵，不考虑类别信息。Class-Conditional CORAL（CCCORAL）改进了这一点：它为每个类别分别计算和对齐协方差矩阵。
+
+CCCORAL损失定义为：
+
+\begin{equation}
+\mathcal{L}_{CCCORAL} = \sum_{c=1}^{C} \frac{1}{4d^2}\|C_s^{(c)} - C_t^{(c)}\|_F^2
+\end{equation}
+
+其中$C_s^{(c)}$和$C_t^{(c)}$分别是源域和目标域中类别$c$的特征协方差矩阵。
+
+CCCORAL的优势在于：
+
+\begin{enumerate}
+    \item \textbf{保持类别结构}：每个类别独立对齐，不会造成类别混淆
+    \item \textbf{更精细的对齐}：对齐二阶统计量比一阶统计量（均值）更加精细
+    \item \textbf{捕捉相关性}：协方差矩阵捕捉了特征维度之间的相关性
+    \item \textbf{理论保证}：CORAL有理论上的域适应误差界
+\end{enumerate}
+
+\section{CCCORAL的实现}
+
+\subsection{理论基础：二阶统计量对齐}
+
+协方差矩阵是特征分布的二阶统计量，它描述了特征维度之间的相关性。对于特征矩阵$F \in \mathbb{R}^{n \times d}$（$n$个样本，$d$维特征），协方差矩阵计算为：
+
+\begin{equation}
+C = \frac{1}{n-1}(F - \bar{F})^T(F - \bar{F})
+\end{equation}
+
+其中$\bar{F}$是特征的均值。
+
+\subsection{类条件化的设计}
+
+CCCORAL的关键是类条件化。对于每个类别$c$，我们分别计算源域和目标域的协方差矩阵：
+
+\begin{verbatim}
+def class_conditional_coral_loss(features_s, labels_s, 
+                                  features_t, labels_t, 
+                                  num_classes):
+    loss = 0.0
+    for c in range(num_classes):
+        # 选择类别c的样本
+        mask_s = (labels_s == c)
+        mask_t = (labels_t == c)
+        
+        if mask_s.sum() > 1 and mask_t.sum() > 1:
+            feat_s_c = features_s[mask_s]
+            feat_t_c = features_t[mask_t]
+            
+            # 计算协方差矩阵
+            cov_s = compute_covariance(feat_s_c)
+            cov_t = compute_covariance(feat_t_c)
+            
+            # 计算Frobenius范数
+            loss += torch.norm(cov_s - cov_t, p='fro')**2
+    
+    d = features_s.shape[1]
+    loss = loss / (4 * d * d * num_classes)
+    return loss
+\end{verbatim}
+
+\subsection{与CDAN的结合}
+
+CDAN+CCCORAL的总损失函数为：
+
+\begin{equation}
+\mathcal{L}_{total} = \mathcal{L}_{CE} + \lambda_{cdan}(p) \mathcal{L}_{cdan} + \lambda_{coral} \mathcal{L}_{CCCORAL}
+\end{equation}
+
+其中$\lambda_{coral}$是CCCORAL损失的权重，通过网格搜索确定为0.01。
+
+\section{实验设置与结果}
+
+\subsection{大规模多seed实验}
+
+为了确保结果的可靠性和统计显著性，我进行了大规模的多seed实验：
+
+\begin{itemize}
+    \item \textbf{随机种子}：seed 0-9，共10个不同的随机种子
+    \item \textbf{对比方法}：CDAN（无CCCORAL）vs CDAN+CCCORAL
+    \item \textbf{数据集}：BCI Competition IV 2a
+    \item \textbf{训练策略}：LOSO交叉验证
+    \item \textbf{超参数}：$\lambda_{coral} = 0.01$
+\end{itemize}
+
+这是一个非常耗时的实验，总共需要训练180个模型（10个seed × 9个受试者 × 2种方法）。
+
+\subsection{10-seed聚合结果}
+
+表\ref{tab:10seed_results}展示了10个seed的聚合结果。
+
+\begin{table}[H]
+\centering
+\caption{CDAN vs CDAN+CCCORAL的10-seed聚合结果}
+\label{tab:10seed_results}
+\begin{tabular}{lccc}
+\toprule
+\textbf{方法} & \textbf{准确率 (\%)} & \textbf{Kappa} & \textbf{Loss} \\
+\midrule
+CDAN & 66.53 $\pm$ 1.56 & 0.554 $\pm$ 0.021 & 0.962 $\pm$ 0.157 \\
+CDAN+CCCORAL & 66.76 $\pm$ 1.54 & 0.557 $\pm$ 0.021 & 0.904 $\pm$ 0.097 \\
+\midrule
+\textbf{提升} & \textbf{+0.23 $\pm$ 0.73} & \textbf{+0.003 $\pm$ 0.010} & \textbf{-0.058 $\pm$ 0.095} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{逐seed详细结果}
+
+表\ref{tab:per_seed_results}展示了每个seed的详细结果。
+
+\begin{table}[H]
+\centering
+\caption{CDAN+CCCORAL在各seed上的表现}
+\label{tab:per_seed_results}
+\begin{tabular}{cccc}
+\toprule
+\textbf{Seed} & \textbf{CDAN准确率} & \textbf{CCCORAL准确率} & \textbf{提升} \\
+\midrule
+0 & 68.36\% & 69.02\% & +0.66\% \\
+1 & 68.17\% & 68.29\% & +0.12\% \\
+2 & 66.59\% & 66.13\% & -0.46\% \\
+3 & 63.89\% & 64.27\% & +0.38\% \\
+4 & 63.77\% & 64.85\% & +1.08\% \\
+5 & 66.40\% & 67.75\% & +1.35\% \\
+6 & 67.09\% & 65.82\% & -1.27\% \\
+7 & 67.05\% & 67.67\% & +0.62\% \\
+8 & 65.86\% & 65.62\% & -0.24\% \\
+9 & 68.13\% & 68.21\% & +0.08\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{CCCORAL的混淆矩阵分析}
+
+图\ref{fig:cccoral_confmat}展示了CDAN+CCCORAL在seed 0上的平均混淆矩阵。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.7\textwidth]{../results/ATCNet_CDAN_CCCORAL_bcic2a_loso_cdan_seed-0_aug-True_GPU0_20260306_1809/confmats/avg_confusion_matrix.png}
+\caption{CDAN+CCCORAL在seed 0上的平均混淆矩阵（9个受试者平均）}
+\label{fig:cccoral_confmat}
+\end{figure}
+
+\subsection{受试者级别的分析（seed 0）}
+
+表\ref{tab:subject_wise_cccoral}展示了seed 0在各受试者上的详细结果。
+
+\begin{table}[H]
+\centering
+\caption{CDAN+CCCORAL在各受试者上的表现（seed 0）}
+\label{tab:subject_wise_cccoral}
+\begin{tabular}{cccc}
+\toprule
+\textbf{受试者} & \textbf{CDAN} & \textbf{CDAN+CCCORAL} & \textbf{提升} \\
+\midrule
+Subject 1 & 72.22\% & 70.49\% & -1.73\% \\
+Subject 2 & 51.74\% & 51.74\% & 0.00\% \\
+Subject 3 & 89.24\% & 85.42\% & -3.82\% \\
+Subject 4 & 68.75\% & 68.06\% & -0.69\% \\
+Subject 5 & 63.89\% & 70.14\% & +6.25\% \\
+Subject 6 & 54.51\% & 55.90\% & +1.39\% \\
+Subject 7 & 79.51\% & 82.29\% & +2.78\% \\
+Subject 8 & 76.39\% & 73.96\% & -2.43\% \\
+Subject 9 & 62.85\% & 63.19\% & +0.34\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{初步结果分析}
+
+\subsection{准确率提升情况}
+
+从10-seed聚合结果来看，CDAN+CCCORAL相比纯CDAN的平均准确率提升了0.23\%。虽然这个提升看起来很小，但有几点值得注意：
+
+\begin{enumerate}
+    \item \textbf{10个seed中有7个提升}：在10个seed中，有7个seed的准确率有提升，3个seed略有下降。这说明CCCORAL在大多数情况下是有帮助的。
+    
+    \item \textbf{最大提升达1.35\%}：seed 5的提升最大，达到1.35\%。这说明CCCORAL在某些情况下能带来显著改进。
+    
+    \item \textbf{Subject 5的显著改进}：在seed 0中，Subject 5的准确率从63.89\%提升到70.14\%，提升了6.25\%。这是一个很大的改进。
+\end{enumerate}
+
+\subsection{稳定性分析}
+
+除了准确率，我还关注了模型的稳定性：
+
+\begin{itemize}
+    \item \textbf{标准差略有下降}：CCCORAL的标准差从1.56\%降到1.54\%，虽然变化很小，但说明稳定性略有改善。
+    
+    \item \textbf{Loss显著降低}：CCCORAL使平均Loss从0.962降到0.904，降低了6\%。这说明CCCORAL确实改善了特征分布的对齐。
+    
+    \item \textbf{Loss的标准差大幅降低}：Loss的标准差从0.157降到0.097，降低了38\%。这说明CCCORAL使训练更加稳定。
+\end{itemize}
+
+\subsection{Subject 5的性能改进}
+
+Subject 5在seed 0上的表现改进最为显著（+6.25\%）。图\ref{fig:cccoral_subject5}展示了CDAN+CCCORAL在Subject 5上的训练曲线。
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.48\textwidth}
+\includegraphics[width=\textwidth]{../results/ATCNet_CDAN_CCCORAL_bcic2a_loso_cdan_seed-0_aug-True_GPU0_20260306_1809/curves/subject_5_acc.png}
+\caption{Subject 5准确率曲线}
+\end{subfigure}
+\hfill
+\begin{subfigure}{0.48\textwidth}
+\includegraphics[width=\textwidth]{../results/ATCNet_CDAN_CCCORAL_bcic2a_loso_cdan_seed-0_aug-True_GPU0_20260306_1809/curves/subject_5_loss.png}
+\caption{Subject 5损失曲线}
+\end{subfigure}
+\caption{CDAN+CCCORAL在Subject 5上的训练曲线。验证准确率达到70.14\%，相比CDAN的63.89\%提升了6.25\%。}
+\label{fig:cccoral_subject5}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.7\textwidth]{../results/ATCNet_CDAN_CCCORAL_bcic2a_loso_cdan_seed-0_aug-True_GPU0_20260306_1809/confmats/confmat_subject_5.png}
+\caption{CDAN+CCCORAL在Subject 5上的混淆矩阵。相比CDAN有明显改善，对角线元素更加突出。}
+\label{fig:cccoral_subject5_confmat}
+\end{figure}
+
+\subsection{为什么看起来有改进？}
+
+虽然准确率的提升不大（+0.23\%），但从多个角度来看，CCCORAL确实带来了改进：
+
+\begin{enumerate}
+    \item \textbf{Loss的改善}：Loss的显著降低说明特征分布确实得到了更好的对齐。
+    
+    \item \textbf{训练稳定性}：Loss标准差的大幅降低说明训练过程更加稳定。
+    
+    \item \textbf{个别受试者的显著改进}：虽然平均提升不大，但某些受试者（如Subject 5）的改进很显著。
+    
+    \item \textbf{理论上的合理性}：CCCORAL的类别条件对齐在理论上比无条件对齐更合理。
+\end{enumerate}
+
+然而，我也注意到一些问题：准确率的提升很小，而且在某些seed和受试者上甚至有下降。这说明CCCORAL虽然有帮助，但效果还不够稳定和显著。下周我需要进行更严格的统计检验，来确定这个改进是否具有统计显著性。
+
+\section{小结}
+
+本周成功实现了CDAN+CCCORAL方法，并进行了大规模的10-seed实验。初步结果显示，CCCORAL带来了0.23\%的平均准确率提升，以及更显著的Loss降低和训练稳定性改善。
+
+然而，0.23\%的提升真的有意义吗？这会不会只是随机波动？10个seed中有3个反而下降了，这说明什么？Loss的降低虽然明显，但为什么没有转化为准确率的显著提升？
+
+这些疑问让我意识到：仅凭平均值和标准差是不够的，我们需要更严格的统计检验。配对t检验能告诉我们这个改进是否具有统计显著性，效应量分析能告诉我们改进的实际意义有多大。更重要的是，我们需要从多个角度验证——不仅看准确率，还要看Loss、Kappa、受试者级别的变化。
+
+下周的统计分析将是关键。它将决定CCCORAL是真正的突破，还是只是一个美好的愿望。
+
+\end{document}
